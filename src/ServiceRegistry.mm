@@ -24,8 +24,12 @@
 #include <IOKit/IOReturn.h>
 #include <os/log.h>
 #include <stdexcept>
-#import <Foundation/NSException.h>
+#include <cstring>
+#include <vector>
 #include "IOIterator.h"
+#include "IOServiceNotification.h"
+#include "NotificationRequests.h"
+#include <algorithm>
 
 extern "C" {
 #include "iokitmigServer.h"
@@ -37,7 +41,7 @@ ServiceRegistry* ServiceRegistry::instance()
 	return &reg;
 }
 
-IOIterator* ServiceRegistry::iteratorForMatchingServices(NSDictionary* criteria) const
+std::vector<IOObject*> ServiceRegistry::matchingServices(NSDictionary* criteria) const
 {
 	std::vector<IOObject*> matching;
 
@@ -47,15 +51,20 @@ IOIterator* ServiceRegistry::iteratorForMatchingServices(NSDictionary* criteria)
 			matching.push_back(*it);
 	}
 
-	return new IOIterator(matching);
+	return matching;
+}
+
+IOIterator* ServiceRegistry::iteratorForMatchingServices(NSDictionary* criteria) const
+{
+	return new IOIterator(matchingServices(criteria));
 }
 
 IOService* ServiceRegistry::firstMatchingService(NSDictionary* criteria) const
 {
-	for (auto it = m_registeredServices.begin(); it != m_registeredServices.end(); it++)
+	for (IOService* service : m_registeredServices)
 	{
-		if ((*it)->matches(criteria))
-			return *it;
+		if (service->matches(criteria))
+			return service;
 	}
 	return nullptr;
 }
@@ -63,6 +72,40 @@ IOService* ServiceRegistry::firstMatchingService(NSDictionary* criteria) const
 void ServiceRegistry::registerService(IOService* service)
 {
 	m_registeredServices.push_back(service);
+
+	// A notification may be destroyed by its client at any time, but only on
+	// this queue, so the list cannot change while it is walked
+	for (IOServiceNotification* notification : m_notifications)
+	{
+		if (notification->kind() != IOServiceNotification::Terminate)
+			notification->serviceEvent(service);
+	}
+}
+
+void ServiceRegistry::unregisterService(IOService* service)
+{
+	auto it = std::find(m_registeredServices.begin(), m_registeredServices.end(), service);
+	if (it == m_registeredServices.end())
+		return;
+	m_registeredServices.erase(it);
+
+	for (IOServiceNotification* notification : m_notifications)
+	{
+		if (notification->kind() == IOServiceNotification::Terminate)
+			notification->serviceEvent(service);
+		else
+			notification->remove(service);
+	}
+}
+
+void ServiceRegistry::addNotification(IOServiceNotification* notification)
+{
+	m_notifications.push_back(notification);
+}
+
+void ServiceRegistry::removeNotification(IOServiceNotification* notification)
+{
+	m_notifications.remove(notification);
 }
 
 kern_return_t is_io_service_get_matching_services_ool
@@ -74,66 +117,33 @@ kern_return_t is_io_service_get_matching_services_ool
 	mach_port_t *existing
 )
 {
+	// TODO
+    return kIOReturnUnsupported;
+}
+
+// Unserializes the binary matching dictionary of a request. The caller
+// releases the result.
+static NSDictionary* unserializeMatching(const char* matching, mach_msg_type_number_t matchingCnt)
+{
 	CFStringRef errorString = nullptr;
-	@try
+	CFTypeRef criteria = IOCFUnserializeBinary(matching, matchingCnt, nullptr, 0, &errorString);
+
+	if (!criteria)
 	{
-		try
-		{
-			CFTypeRef criteria = IOCFUnserializeBinary(matching, matchingCnt, nullptr, 0, &errorString);
-			if (!criteria)
-				criteria = IOCFUnserialize(matching, nullptr, 0, &errorString);
-
-			if (!criteria)
-				throwCFStringException(CFSTR("io_service_get_matching_services_ool(): cannot parse 'matching': %@"), errorString);
-
-			if (CFGetTypeID(criteria) != CFDictionaryGetTypeID())
-			{
-				CFRelease(criteria);
-				throw std::runtime_error("io_service_get_matching_services_ool(): dictionary expected");
-			}
-
-			IOIterator* iterator = ServiceRegistry::instance()->iteratorForMatchingServices((NSDictionary*) criteria);
-			CFRelease(criteria);
-
-			*existing = iterator->port();
-			iterator->releaseLater();
-
-			if (result)
-				*result = kIOReturnSuccess;
-
-			return kIOReturnSuccess;
-		}
-		catch (const std::exception& e)
-		{
-			os_log_error(OS_LOG_DEFAULT, "is_io_service_get_matching_services_ool: %s", e.what());
-			if (errorString)
-				CFRelease(errorString);
-
-			if (result)
-				*result = kIOReturnBadArgument;
-			return kIOReturnBadArgument;
-		}
-		catch (...)
-		{
-			os_log_error(OS_LOG_DEFAULT, "is_io_service_get_matching_services_ool: unknown C++ exception");
-			if (errorString)
-				CFRelease(errorString);
-
-			if (result)
-				*result = kIOReturnBadArgument;
-			return kIOReturnBadArgument;
-		}
-	}
-	@catch (NSException* e)
-	{
-		os_log_error(OS_LOG_DEFAULT, "is_io_service_get_matching_services_ool: NSException: %s", [[e description] UTF8String]);
+		os_log_error(OS_LOG_DEFAULT, "iokitd: cannot parse a matching dictionary");
 		if (errorString)
 			CFRelease(errorString);
-
-		if (result)
-			*result = kIOReturnBadArgument;
-		return kIOReturnBadArgument;
+		return nil;
 	}
+
+	if (CFGetTypeID(criteria) != CFDictionaryGetTypeID())
+	{
+		os_log_error(OS_LOG_DEFAULT, "iokitd: the matching criteria are not a dictionary");
+		CFRelease(criteria);
+		return nil;
+	}
+
+	return (NSDictionary*) criteria;
 }
 
 kern_return_t is_io_service_get_matching_services_bin
@@ -144,117 +154,21 @@ kern_return_t is_io_service_get_matching_services_bin
 	mach_port_t *existing
 )
 {
-	CFStringRef errorString = nullptr;
-	@try
-	{
-		try
-		{
-			CFTypeRef criteria = IOCFUnserializeBinary(matching, matchingCnt, nullptr, 0, &errorString);
+	*existing = MACH_PORT_NULL;
 
-			if (!criteria)
-				throwCFStringException(CFSTR("io_service_get_matching_services_bin(): cannot parse 'matching': %@"), errorString);
-			
-			if (CFGetTypeID(criteria) != CFDictionaryGetTypeID())
-			{
-				CFRelease(criteria);
-				throw std::runtime_error("io_service_get_matching_services_bin(): dictionary expected");
-			}
-
-			// Criteria example:
-			// IOProviderClass -> IODisplayConnect
-			IOIterator* iterator = ServiceRegistry::instance()->iteratorForMatchingServices((NSDictionary*) criteria);
-			CFRelease(criteria);
-
-			*existing = iterator->port();
-
-			iterator->releaseLater();
-
-			return kIOReturnSuccess;
-		}
-		catch (const std::exception& e)
-		{
-			os_log_error(OS_LOG_DEFAULT, "is_io_service_get_matching_services_bin: %s", e.what());
-			if (errorString)
-				CFRelease(errorString);
-
-			return kIOReturnBadArgument;
-		}
-		catch (...)
-		{
-			os_log_error(OS_LOG_DEFAULT, "is_io_service_get_matching_services_bin: unknown C++ exception");
-			if (errorString)
-				CFRelease(errorString);
-
-			return kIOReturnBadArgument;
-		}
-	}
-	@catch (NSException* e)
-	{
-		os_log_error(OS_LOG_DEFAULT, "is_io_service_get_matching_services_bin: NSException: %s", [[e description] UTF8String]);
-		if (errorString)
-			CFRelease(errorString);
-
+	// Criteria example:
+	// IOProviderClass -> IODisplayConnect
+	NSDictionary* criteria = unserializeMatching(matching, matchingCnt);
+	if (!criteria)
 		return kIOReturnBadArgument;
-	}
-}
 
-kern_return_t is_io_service_get_matching_services
-(
-	mach_port_t master_port,
-	io_string_t matching,
-	mach_port_t *existing
-)
-{
-	CFStringRef errorString = nullptr;
-	@try
-	{
-		try
-		{
-			CFTypeRef criteria = IOCFUnserialize(matching, nullptr, 0, &errorString);
+	IOIterator* iterator = ServiceRegistry::instance()->iteratorForMatchingServices(criteria);
+	CFRelease(criteria);
 
-			if (!criteria)
-				throwCFStringException(CFSTR("io_service_get_matching_services(): cannot parse 'matching': %@"), errorString);
-			
-			if (CFGetTypeID(criteria) != CFDictionaryGetTypeID())
-			{
-				CFRelease(criteria);
-				throw std::runtime_error("io_service_get_matching_services(): dictionary expected");
-			}
+	*existing = iterator->port();
+	iterator->releaseLater();
 
-			IOIterator* iterator = ServiceRegistry::instance()->iteratorForMatchingServices((NSDictionary*) criteria);
-			CFRelease(criteria);
-
-			*existing = iterator->port();
-
-			iterator->releaseLater();
-
-			return kIOReturnSuccess;
-		}
-		catch (const std::exception& e)
-		{
-			os_log_error(OS_LOG_DEFAULT, "is_io_service_get_matching_services: %s", e.what());
-			if (errorString)
-				CFRelease(errorString);
-
-			return kIOReturnBadArgument;
-		}
-		catch (...)
-		{
-			os_log_error(OS_LOG_DEFAULT, "is_io_service_get_matching_services: unknown C++ exception");
-			if (errorString)
-				CFRelease(errorString);
-
-			return kIOReturnBadArgument;
-		}
-	}
-	@catch (NSException* e)
-	{
-		os_log_error(OS_LOG_DEFAULT, "is_io_service_get_matching_services: NSException: %s", [[e description] UTF8String]);
-		if (errorString)
-			CFRelease(errorString);
-
-		return kIOReturnBadArgument;
-	}
+	return kIOReturnSuccess;
 }
 
 kern_return_t is_io_service_get_matching_service_bin
@@ -265,62 +179,99 @@ kern_return_t is_io_service_get_matching_service_bin
 	mach_port_t *service
 )
 {
-	CFStringRef errorString = nullptr;
-	@try
+	*service = MACH_PORT_NULL;
+
+	NSDictionary* criteria = unserializeMatching(matching, matchingCnt);
+	if (!criteria)
+		return kIOReturnBadArgument;
+
+	IOService* match = ServiceRegistry::instance()->firstMatchingService(criteria);
+	CFRelease(criteria);
+
+	if (!match)
+		return kIOReturnNotFound;
+
+	*service = match->port();
+	return kIOReturnSuccess;
+}
+
+kern_return_t iokitAddServiceNotification
+(
+	const char* notification_type,
+	const char* matching,
+	mach_msg_type_number_t matchingCnt,
+	mach_port_t wake_port,
+	const void* reference,
+	size_t referenceSize,
+	bool client64,
+	mach_port_t *notification
+)
+{
+	*notification = MACH_PORT_NULL;
+
+	NSDictionary* criteria = unserializeMatching(matching, matchingCnt);
+	if (!criteria)
+		return kIOReturnBadArgument;
+
+	// The notification is an iterator over the services that match: the ones
+	// registered now (for publish and match notifications, which is what the
+	// client walks to arm it), and the ones that come or go later, announced
+	// on the wake port. Termination notifications start empty.
+	IOServiceNotification::Kind kind;
+	if (!strcmp(notification_type, kIOPublishNotification) ||
+		!strcmp(notification_type, kIOFirstPublishNotification))
+		kind = IOServiceNotification::Publish;
+	else if (!strcmp(notification_type, kIOMatchedNotification) ||
+		!strcmp(notification_type, kIOFirstMatchNotification))
+		kind = IOServiceNotification::Match;
+	else
+		kind = IOServiceNotification::Terminate;
+
+	// Takes over the criteria and the wake port right
+	IOServiceNotification* iterator = new IOServiceNotification(kind, criteria, wake_port, reference,
+		referenceSize, client64);
+
+	if (kind != IOServiceNotification::Terminate)
 	{
-		try
-		{
-			CFTypeRef criteria = IOCFUnserializeBinary(matching, matchingCnt, nullptr, 0, &errorString);
-
-			if (!criteria)
-				throwCFStringException(CFSTR("io_service_get_matching_service_bin(): cannot parse 'matching': %@"), errorString);
-			
-			if (CFGetTypeID(criteria) != CFDictionaryGetTypeID())
-			{
-				CFRelease(criteria);
-				throw std::runtime_error("io_service_get_matching_service_bin(): dictionary expected");
-			}
-
-			IOService* matched = ServiceRegistry::instance()->firstMatchingService((NSDictionary*) criteria);
-			CFRelease(criteria);
-
-			if (matched)
-			{
-				*service = matched->port();
-				return kIOReturnSuccess;
-			}
-			else
-			{
-				*service = MACH_PORT_NULL;
-				return kIOReturnNotFound;
-			}
-		}
-		catch (const std::exception& e)
-		{
-			os_log_error(OS_LOG_DEFAULT, "is_io_service_get_matching_service_bin: %s", e.what());
-			if (errorString)
-				CFRelease(errorString);
-
-			*service = MACH_PORT_NULL;
-			return kIOReturnBadArgument;
-		}
-		catch (...)
-		{
-			os_log_error(OS_LOG_DEFAULT, "is_io_service_get_matching_service_bin: unknown C++ exception");
-			if (errorString)
-				CFRelease(errorString);
-
-			*service = MACH_PORT_NULL;
-			return kIOReturnBadArgument;
-		}
+		for (IOObject* service : ServiceRegistry::instance()->matchingServices(criteria))
+			iterator->append(service);
 	}
-	@catch (NSException* e)
-	{
-		os_log_error(OS_LOG_DEFAULT, "is_io_service_get_matching_service_bin: NSException: %s", [[e description] UTF8String]);
-		if (errorString)
-			CFRelease(errorString);
 
-		*service = MACH_PORT_NULL;
+	*notification = iterator->port();
+	iterator->releaseLater();
+
+	return kIOReturnSuccess;
+}
+
+kern_return_t is_io_service_add_notification_bin_64
+(
+	mach_port_t master_port,
+	io_name_t notification_type,
+	io_struct_inband_t matching,
+	mach_msg_type_number_t matchingCnt,
+	mach_port_t wake_port,
+	io_async_ref64_t reference,
+	mach_msg_type_number_t referenceCnt,
+	mach_port_t *notification
+)
+{
+	if (referenceCnt > kOSAsyncRef64Count)
+	{
+		*notification = MACH_PORT_NULL;
 		return kIOReturnBadArgument;
 	}
+
+	return iokitAddServiceNotification(notification_type, matching, matchingCnt, wake_port,
+		reference, referenceCnt * sizeof(io_user_reference_t), true, notification);
+}
+
+kern_return_t is_io_service_get_matching_services
+(
+	mach_port_t master_port,
+	io_string_t matching,
+	mach_port_t *existing
+)
+{
+    // Old unsupported API
+    return kIOReturnUnsupported;
 }

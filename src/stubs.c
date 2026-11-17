@@ -33,14 +33,6 @@ kern_return_t is_io_registry_iterator_exit_entry
     return KERN_NOT_SUPPORTED;
 }
 
-kern_return_t is_io_service_close
-(
-	mach_port_t connection
-)
-{
-    return 0; // kIOReturnSuccess
-}
-
 kern_return_t is_io_connect_get_service
 (
 	mach_port_t connection,
@@ -269,6 +261,22 @@ kern_return_t is_io_async_method_scalarI_structureI
     return KERN_NOT_SUPPORTED;
 }
 
+// Requests of 32-bit clients for this id are decoded by iokitmig32.defs; the
+// 64-bit subsystem only needs the symbol.
+kern_return_t is_io_service_add_interest_notification
+(
+	mach_port_t service,
+	io_name_t type_of_interest,
+	mach_port_t wake_port,
+	io_async_ref_t reference,
+	mach_msg_type_number_t referenceCnt,
+	mach_port_t *notification
+)
+{
+    STUB();
+    return KERN_NOT_SUPPORTED;
+}
+
 kern_return_t is_io_async_method_structureI_structureO
 (
 	mach_port_t connection,
@@ -291,20 +299,6 @@ kern_return_t is_io_service_add_notification
 	mach_port_t master_port,
 	io_name_t notification_type,
 	io_string_t matching,
-	mach_port_t wake_port,
-	io_async_ref_t reference,
-	mach_msg_type_number_t referenceCnt,
-	mach_port_t *notification
-)
-{
-    STUB();
-    return KERN_NOT_SUPPORTED;
-}
-
-kern_return_t is_io_service_add_interest_notification
-(
-	mach_port_t service,
-	io_name_t type_of_interest,
 	mach_port_t wake_port,
 	io_async_ref_t reference,
 	mach_msg_type_number_t referenceCnt,
@@ -415,22 +409,6 @@ kern_return_t is_io_object_get_bundle_identifier
     return KERN_NOT_SUPPORTED;
 }
 
-kern_return_t is_io_service_open_extended
-(
-	mach_port_t service,
-	task_t owningTask,
-	uint32_t connect_type,
-	NDR_record_t ndr,
-	io_buf_ptr_t properties,
-	mach_msg_type_number_t propertiesCnt,
-	kern_return_t *result,
-	mach_port_t *connection
-)
-{
-    STUB();
-    return KERN_NOT_SUPPORTED;
-}
-
 kern_return_t is_io_connect_map_memory_into_task
 (
 	mach_port_t connection,
@@ -499,20 +477,6 @@ kern_return_t is_io_service_add_notification_64
 	mach_port_t master_port,
 	io_name_t notification_type,
 	io_string_t matching,
-	mach_port_t wake_port,
-	io_async_ref64_t reference,
-	mach_msg_type_number_t referenceCnt,
-	mach_port_t *notification
-)
-{
-    STUB();
-    return KERN_NOT_SUPPORTED;
-}
-
-kern_return_t is_io_service_add_interest_notification_64
-(
-	mach_port_t service,
-	io_name_t type_of_interest,
 	mach_port_t wake_port,
 	io_async_ref64_t reference,
 	mach_msg_type_number_t referenceCnt,
@@ -646,22 +610,6 @@ kern_return_t is_io_service_add_notification_bin
     return KERN_NOT_SUPPORTED;
 }
 
-kern_return_t is_io_service_add_notification_bin_64
-(
-	mach_port_t master_port,
-	io_name_t notification_type,
-	io_struct_inband_t matching,
-	mach_msg_type_number_t matchingCnt,
-	mach_port_t wake_port,
-	io_async_ref64_t reference,
-	mach_msg_type_number_t referenceCnt,
-	mach_port_t *notification
-)
-{
-    STUB();
-    return KERN_NOT_SUPPORTED;
-}
-
 kern_return_t is_io_device_tree_entry_exists_with_name
 (
 	mach_port_t master_port,
@@ -672,59 +620,3 @@ kern_return_t is_io_device_tree_entry_exists_with_name
 	STUB();
 	return KERN_NOT_SUPPORTED;
 }
-
-kern_return_t is_io_registry_entry_get_properties_bin_buf
-(
-	mach_port_t registry_entry,
-	mach_vm_address_t buf,
-	mach_vm_size_t *bufsize,
-	io_buf_ptr_t *properties,
-	mach_msg_type_number_t *propertiesCnt
-)
-{
-	STUB();
-	return KERN_NOT_SUPPORTED;
-}
-
-kern_return_t is_io_registry_entry_get_property_bin_buf
-(
-	mach_port_t registry_entry,
-	io_name_t plane,
-	io_name_t property_name,
-	uint32_t options,
-	mach_vm_address_t buf,
-	mach_vm_size_t *bufsize,
-	io_buf_ptr_t *properties,
-	mach_msg_type_number_t *propertiesCnt
-)
-{
-	STUB();
-	return KERN_NOT_SUPPORTED;
-}
-
-kern_return_t is_io_connect_map_shared_memory(
-    mach_port_t connection,
-    uint32_t memory_type,
-    task_t into_task,
-    mach_vm_address_t *address,
-    mach_vm_size_t *size,
-    uint32_t flags,
-    io_name_t property_name,
-    io_struct_inband_t inband_output,
-    mach_msg_type_number_t *inband_outputCnt
-)
-{
-    STUB();
-    return KERN_NOT_SUPPORTED;
-}
-
-kern_return_t is_io_service_wait_quiet_with_options(
-    mach_port_t service,
-    mach_timespec_t wait_time,
-    uint32_t options
-)
-{
-    STUB();
-    return KERN_NOT_SUPPORTED;
-}
-

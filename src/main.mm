@@ -30,24 +30,27 @@
 #include "iokitmig.h"
 #include "IOObject.h"
 #include "IODisplayConnectX11.h"
+#include "IODisplayConnectDRM.h"
+#include "IOHostGPU.h"
 #include "PowerAssertions.h"
 #include "IOSurfaceRoot.h"
 #include "IOPlatformExpertDevice.h"
+#include "IOPMrootDomain.h"
+#include "HostInputMonitor.h"
 
 extern "C" {
 #include "iokitmigServer.h"
+#include "iokitDispatch.h"
 #include "powermanagementServer.h"
 }
 
 static const char* SERVICE_NAME = "org.darlinghq.iokitd";
-mach_port_t g_masterPort, g_deathPort, g_powerManagementPort;
+mach_port_t g_masterPort, g_powerManagementPort;
 
 static void discoverAllDevices();
-static boolean_t iokitSaveAuditTrail(mach_msg_header_t *message, mach_msg_header_t *reply);
 
 int main(int argc, const char** argv)
 {
-	signal(SIGPIPE, SIG_IGN);
 	mach_port_t bs;
 	kern_return_t ret;
 
@@ -64,13 +67,6 @@ int main(int argc, const char** argv)
 	if (ret != KERN_SUCCESS)
 	{
 		os_log_error(OS_LOG_DEFAULT, "%d bootstrap_check_in(%s) failed with error %d", getpid(), SERVICE_NAME, ret);
-		return 1;
-	}
-
-	ret = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &g_deathPort);
-	if (ret != KERN_SUCCESS)
-	{
-		os_log_error(OS_LOG_DEFAULT, "%d failed to allocate notification port: %d", getpid(), ret);
 		return 1;
 	}
 
@@ -110,36 +106,16 @@ int main(int argc, const char** argv)
 		dispatch_mig_server(pwrMgmtPortSource, _powermanagement_subsystem.maxsize, powermanagement_server); // FIXME
 	});
 
-	////////////////////////////////
-	// unused port notifications  //
-	////////////////////////////////
-	dispatch_source_t deathSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_MACH_RECV, g_deathPort, 0, queue);
-
-	if (!deathSource)
-	{
-		os_log_error(OS_LOG_DEFAULT, "%d dispatch_source_create() failed for notification port", getpid());
-		return 1;
-	}
-
-	dispatch_source_set_event_handler(deathSource, ^{
-		dispatch_mig_server(deathSource, sizeof(mach_no_senders_notification_t), IOObject::deathNotify);
-	});
-
 	dispatch_resume(portSource);
-	dispatch_resume(deathSource);
 	dispatch_resume(pwrMgmtPortSource);
+
+	IOPMrootDomain::instance()->startHostSleepMonitor();
+	HostInputMonitor::start(ServiceRegistry::instance());
 
 	os_log(OS_LOG_DEFAULT, "iokitd up and running.");
 
 	dispatch_main();
 	return 0;
-}
-
-static boolean_t iokitSaveAuditTrail(mach_msg_header_t *message, mach_msg_header_t *reply)
-{
-	const mach_msg_context_trailer_t* trailer = reinterpret_cast<mach_msg_context_trailer_t*>(reinterpret_cast<char*>(message) + message->msgh_size);
-	audit_token_to_au32(trailer->msgh_audit, nullptr, nullptr, nullptr, nullptr, nullptr, &g_iokitCurrentCallerPID, nullptr, nullptr);
-	return iokit_server(message, reply);
 }
 
 static void discoverAllDevices()
@@ -148,6 +124,12 @@ static void discoverAllDevices()
 	// Trick to make sure the root object gets instantiated first and gets the lowest ID
 	IORegistryEntry::root();
 	IOPlatformExpertDevice::registerSelf(registry);
-	IODisplayConnectX11::discoverDevices(registry);
+	// The connectors of the host's DRM devices are the primary source of displays. XRandR
+	// outputs are published only if DRM shows none (Xvfb, a nested or remote X server), so
+	// that a display is never published twice.
+	size_t drmDisplays = IODisplayConnectDRM::discoverDevices(registry);
+	IODisplayConnectX11::discoverDevices(registry, drmDisplays == 0);
+	IOHostGPU::registerSelf(registry);
 	IOSurfaceRoot::registerSelf(registry);
+	IOPMrootDomain::registerSelf(registry);
 }
